@@ -1,0 +1,101 @@
+name: Release minimal ffmpeg (win64)
+
+# PyAutoFlow 타임랩스용 최소 ffmpeg.exe 를 빌드→검증(wine)→GitHub Release 로 배포.
+# 앱은 이 릴리스의 raw ffmpeg.exe 를 다운로드-온-디맨드로 받아 캐시한다.
+#
+# 실행:
+#   - 수동(Actions 탭 Run workflow): tag 입력.
+#   - 태그 push: min-* (예: min-8.0-1) → 그 태그로 릴리스.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. min-8.0-1)"
+        required: true
+        default: "min-8.0-1"
+  push:
+    tags:
+      - 'min-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (ffmpeg source = this repo)
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchain + wine
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential mingw-w64 mingw-w64-tools \
+            nasm yasm pkg-config git \
+            wine wine64
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then t="${GITHUB_REF_NAME}"; else t="${{ github.event.inputs.tag }}"; fi
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+
+      - name: Build minimal ffmpeg.exe
+        run: bash scripts/build-min-win64.sh
+
+      - name: Verify components (wine)
+        run: |
+          set -e
+          FF="wine out/ffmpeg.exe -hide_banner"
+          echo "--- version ---"; $FF -version | head -1
+          $FF -encoders 2>/dev/null | grep -q ' libx264 '    || { echo "FAIL libx264"; exit 1; }
+          $FF -muxers   2>/dev/null | grep -qE ' mp4'         || { echo "FAIL mp4"; exit 1; }
+          $FF -demuxers 2>/dev/null | grep -qE ' image2'      || { echo "FAIL image2"; exit 1; }
+          $FF -filters  2>/dev/null | grep -qE ' scale '      || { echo "FAIL scale"; exit 1; }
+          echo "OK components"
+
+      - name: End-to-end smoke (real BMP seq → mp4, wine)
+        run: |
+          set -e
+          mkdir -p smoke
+          # 앱 캡처와 동형: top-down 24bpp BMP 2장 생성(홀수 높이 821 로 scale 보정 경로까지 태움).
+          python3 - smoke <<'PY'
+          import struct, sys, os
+          d = sys.argv[1]; w, h = 100, 821
+          row = (w*3 + 3) & ~3
+          hdr = struct.pack('<2sIHHI', b'BM', 54+row*h, 0, 0, 54)
+          hdr += struct.pack('<IiiHHIIiiII', 40, w, h, 1, 24, 0, row*h, 2835, 2835, 0, 0)
+          for i in range(3):
+              px = (bytes([(i*80)%256, 60, 200])*w) + b'\x00'*(row-w*3)
+              open(os.path.join(d, f'frame_{i:06d}.bmp'),'wb').write(hdr + px*h)
+          PY
+          wine out/ffmpeg.exe -y -framerate 24 -start_number 0 \
+            -i "smoke/frame_%06d.bmp" \
+            -c:v libx264 -pix_fmt yuv420p -crf 26 -preset veryfast -movflags +faststart \
+            -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -progress pipe:1 -nostats \
+            smoke/out.mp4
+          test -s smoke/out.mp4 || { echo "FAIL: no mp4"; exit 1; }
+          echo "OK: image2→libx264 mp4 pipeline works (size=$(du -h out/ffmpeg.exe|cut -f1))"
+
+      - name: Checksum
+        run: cd out && sha256sum ffmpeg.exe | tee ffmpeg.exe.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: minimal ffmpeg ${{ steps.tag.outputs.tag }} (win64)
+          body: |
+            Minimal static **ffmpeg.exe** (win64) for PyAutoFlow timelapse encoding.
+            Built from this repo's ffmpeg source via `scripts/build-min-win64.sh` (corresponding source, GPL).
+
+            Enabled: libx264 (H.264) · mp4 muxer · image2 demuxer · bmp/png decoders ·
+            scale/format/fps filters · yuv420p. Most other codecs/formats disabled to keep it small.
+            Verified in CI with wine (component check + real BMP-sequence → mp4 smoke).
+          files: |
+            out/ffmpeg.exe
+            out/ffmpeg.exe.sha256
+          fail_on_unmatched_files: true

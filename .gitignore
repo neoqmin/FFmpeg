@@ -56,3 +56,7 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+!/.github/
+# PyAutoFlow 최소 빌드 산출물(로컬)
+/out/
+/.build/

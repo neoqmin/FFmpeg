@@ -1,2 +1,5 @@
 *.pnm -diff -text
 Changelog    merge=union
+# PyAutoFlow 빌드 스크립트/워크플로는 ubuntu CI 에서 실행 — LF 강제(CRLF 시 bash 깨짐).
+scripts/*.sh text eol=lf
+.github/workflows/*.yml text eol=lf
